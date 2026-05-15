@@ -1,3 +1,4 @@
+
 $configUrl = "https://raw.githubusercontent.com/Pr3tzals/HN-WP/main/config.json"
 
 try {

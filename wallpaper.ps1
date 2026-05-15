@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
 Applies wallpaper from a central JSON configuration when a new theme is published via Intune Proactive Remediation.
-The wallpaper is enforced once per theme, after which users are free to change their wallpaper until the next update.
+The wallpaper is forced once per theme, after which users can freely change it until the next update.
 
 .AUTHOR
 Fabio Figueiredo
@@ -10,11 +10,11 @@ Fabio Figueiredo
 - New theme = force apply
 - Same theme = do nothing
 - Allows user changes after application
+- Restarts Explorer only if required
 - Designed for daily Proactive Remediation execution
 
 .NOTES
 - Must run in USER context (HKCU)
-- Requires JSON config hosted externally (e.g. GitHub)
 #>
 
 # ================= CONFIG =================
@@ -76,20 +76,20 @@ $WallpaperFile = Join-Path $ThemeFolder ("wallpaper" + $extension)
 
 # --- Download wallpaper ---
 try {
-    Write-Log "Downloading wallpaper..."
+    Write-Log "Downloading wallpaper from $WallpaperUrl"
     Invoke-WebRequest -Uri $WallpaperUrl -OutFile $WallpaperFile -UseBasicParsing -ErrorAction Stop
 } catch {
     Write-Log "Download failed: $($_.Exception.Message)" "ERROR"
     exit 0
 }
 
-# --- Apply wallpaper (FORCE for new theme) ---
+# --- Apply wallpaper ---
 try {
     Set-ItemProperty -Path 'HKCU:\Control Panel\Desktop' -Name Wallpaper -Value $WallpaperFile
     Set-ItemProperty -Path 'HKCU:\Control Panel\Desktop' -Name WallpaperStyle -Value '2'
     Set-ItemProperty -Path 'HKCU:\Control Panel\Desktop' -Name TileWallpaper -Value '0'
 
-    # Clear cache
+    # Reset theme cache
     $themesDir = Join-Path $env:APPDATA 'Microsoft\Windows\Themes'
     Remove-Item "$themesDir\TranscodedWallpaper" -Force -ErrorAction SilentlyContinue
 
@@ -103,13 +103,29 @@ public class Wallpaper {
 }
 "@
 
-    [Wallpaper]::SystemParametersInfo(20, 0, $WallpaperFile, 3)
+    [Wallpaper]::SystemParametersInfo(20, 0, $WallpaperFile, 3) | Out-Null
 
-    # Restart Explorer
-    Stop-Process explorer -Force -ErrorAction SilentlyContinue
-    Start-Process explorer.exe
+    Write-Log "Wallpaper applied via API."
 
-    Write-Log "Wallpaper forcibly applied for new theme: $Theme"
+    # --- Validate application ---
+    Start-Sleep -Seconds 2
+
+    $appliedWallpaper = (Get-ItemProperty -Path 'HKCU:\Control Panel\Desktop' -Name Wallpaper -ErrorAction SilentlyContinue).Wallpaper
+
+    if ($appliedWallpaper -and ($appliedWallpaper.ToLower() -ne $WallpaperFile.ToLower())) {
+        Write-Log "Wallpaper not reflected yet. Restarting Explorer..."
+
+        try {
+            Get-Process explorer -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+            Start-Process explorer.exe
+            Write-Log "Explorer restarted to finalize wallpaper update."
+        } catch {
+            Write-Log "Explorer restart failed: $($_.Exception.Message)" "WARN"
+        }
+    } else {
+        Write-Log "Wallpaper applied successfully. Explorer restart not required."
+    }
+
 } catch {
     Write-Log "Failed to apply wallpaper: $($_.Exception.Message)" "ERROR"
     exit 0
