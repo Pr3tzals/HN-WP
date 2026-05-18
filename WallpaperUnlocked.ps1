@@ -1,16 +1,6 @@
 <#
 .SYNOPSIS
-Applies wallpaper from a central JSON configuration when a new theme is published via Intune Proactive Remediation.
-
-.DESIGN
-- New theme = force apply
-- Same theme = do nothing
-- Allows or prevents user changes based on flag
-- Restarts Explorer only if required
-- Designed for daily Proactive Remediation execution
-
-.NOTES
-- Must run in USER context (HKCU)
+Wallpaper deployment with optional lock enforcement
 #>
 
 # ================= CONFIG =================
@@ -19,11 +9,12 @@ $FolderRoot   = "C:\Intune\Wallpaper"
 $LogsFolder   = Join-Path $FolderRoot "Logs"
 $RegistryFlag = "HKCU:\Software\Intune\Wallpaper"
 
-$EnforceLock  = $false   # TRUE = lock wallpaper, FALSE = allow user changes
+$EnforceLock  = $false   # TRUE = lock wallpaper, FALSE = allow changes
 # =========================================
 
 function Write-Log {
     param([string]$Message,[string]$Level="INFO")
+
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     $line = "[$timestamp][$Level] $Message"
     Write-Output $line
@@ -35,6 +26,32 @@ function Write-Log {
         $logFile = Join-Path $LogsFolder "Wallpaper_$(Get-Date -Format 'yyyyMMdd').log"
         Add-Content -Path $logFile -Value $line
     } catch {}
+}
+
+function Apply-WallpaperPolicy {
+    try {
+        $policyPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Policies\ActiveDesktop"
+
+        try {
+            if (-not (Test-Path $policyPath)) {
+                New-Item -Path $policyPath -Force -ErrorAction Stop | Out-Null
+            }
+        } catch {
+            Write-Log "Could not create policy registry path (likely managed by policy or restricted): $($_.Exception.Message)" "WARN"
+            return
+        }
+
+        if ($EnforceLock) {
+            Set-ItemProperty -Path $policyPath -Name "NoChangingWallPaper" -Value 1 -Type DWord
+            Write-Log "Wallpaper changes are LOCKED."
+        } else {
+            Remove-ItemProperty -Path $policyPath -Name "NoChangingWallPaper" -ErrorAction SilentlyContinue
+            Write-Log "Wallpaper changes are ALLOWED."
+        }
+
+    } catch {
+        Write-Log "Failed to apply lock policy: $($_.Exception.Message)" "WARN"
+    }
 }
 
 # --- Load JSON config ---
@@ -53,14 +70,14 @@ if (-not (Test-Path $RegistryFlag)) {
     New-Item -Path $RegistryFlag -Force | Out-Null
 }
 
-# --- Check if this theme already applied ---
+# --- Check if theme already applied ---
 $applied = (Get-ItemProperty -Path $RegistryFlag -Name $Theme -ErrorAction SilentlyContinue).$Theme
 
 if ($applied -eq 1) {
-    Write-Log "Theme $Theme already applied. Nothing to do."
+    Write-Log "Theme $Theme already applied. Skipping download."
 
-    # Still enforce lock/unlock even if already applied
-    goto ApplyPolicy
+    Apply-WallpaperPolicy
+    exit 0
 }
 
 # --- Prep folders ---
@@ -71,6 +88,7 @@ New-Item -Path $ThemeFolder -ItemType Directory -Force | Out-Null
 # --- File path ---
 $extension = [System.IO.Path]::GetExtension($WallpaperUrl)
 if ([string]::IsNullOrWhiteSpace($extension)) { $extension = ".png" }
+
 $WallpaperFile = Join-Path $ThemeFolder ("wallpaper" + $extension)
 
 # --- Download wallpaper ---
@@ -88,11 +106,9 @@ try {
     Set-ItemProperty -Path 'HKCU:\Control Panel\Desktop' -Name WallpaperStyle -Value '2'
     Set-ItemProperty -Path 'HKCU:\Control Panel\Desktop' -Name TileWallpaper -Value '0'
 
-    # Reset theme cache
     $themesDir = Join-Path $env:APPDATA 'Microsoft\Windows\Themes'
     Remove-Item "$themesDir\TranscodedWallpaper" -Force -ErrorAction SilentlyContinue
 
-    # Apply via Windows API
     Add-Type @"
 using System;
 using System.Runtime.InteropServices;
@@ -111,17 +127,19 @@ public class Wallpaper {
     $appliedWallpaper = (Get-ItemProperty -Path 'HKCU:\Control Panel\Desktop' -Name Wallpaper -ErrorAction SilentlyContinue).Wallpaper
 
     if ($appliedWallpaper -and ($appliedWallpaper.ToLower() -ne $WallpaperFile.ToLower())) {
+
         Write-Log "Wallpaper not reflected yet. Restarting Explorer..."
 
         try {
             Get-Process explorer -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
             Start-Process explorer.exe
-            Write-Log "Explorer restarted to finalize wallpaper update."
+            Write-Log "Explorer restarted."
         } catch {
             Write-Log "Explorer restart failed: $($_.Exception.Message)" "WARN"
         }
+
     } else {
-        Write-Log "Wallpaper applied successfully. Explorer restart not required."
+        Write-Log "Wallpaper applied successfully."
     }
 
 } catch {
@@ -129,29 +147,11 @@ public class Wallpaper {
     exit 0
 }
 
-# --- Mark as applied ---
+# --- Mark applied ---
 New-ItemProperty -Path $RegistryFlag -Name $Theme -Value 1 -PropertyType DWord -Force | Out-Null
 Write-Log "Theme $Theme marked as applied."
 
-# --- POLICY SECTION ---
-:ApplyPolicy
-try {
-    $policyPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Policies\ActiveDesktop"
-
-    if (-not (Test-Path $policyPath)) {
-        New-Item -Path $policyPath -Force | Out-Null
-    }
-
-    if ($EnforceLock) {
-        Set-ItemProperty -Path $policyPath -Name "NoChangingWallPaper" -Value 1 -Type DWord
-        Write-Log "Wallpaper changes are LOCKED."
-    } else {
-        Remove-ItemProperty -Path $policyPath -Name "NoChangingWallPaper" -ErrorAction SilentlyContinue
-        Write-Log "Wallpaper changes are ALLOWED."
-    }
-
-} catch {
-    Write-Log "Failed to apply lock policy: $($_.Exception.Message)" "WARN"
-}
+# --- Apply lock policy ---
+Apply-WallpaperPolicy
 
 exit 0
